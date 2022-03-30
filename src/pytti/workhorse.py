@@ -183,8 +183,8 @@ def load_video_source(
 @hydra.main(config_path="config", config_name="default")
 def _main(cfg: DictConfig):
     # params = OmegaConf.to_container(cfg, resolve=True)
-    params = cfg
-    logger.debug(params)
+    logger.debug(cfg)
+    logger.debug(OmegaConf.to_yaml(cfg))
     logger.debug(OmegaConf.to_container(cfg, resolve=True))
     latest = -1
 
@@ -201,8 +201,8 @@ def _main(cfg: DictConfig):
     # NB: `backup/` dir probably not working at present
     if restore and restore_run == latest:
         _, restore_run = get_last_file(
-            f"backup/{params.file_namespace}",
-            f"^(?P<pre>{re.escape(params.file_namespace)}\\(?)(?P<index>\\d*)(?P<post>\\)?_\\d+\\.bak)$",
+            f"backup/{cfg.file_namespace}",
+            f"^(?P<pre>{re.escape(cfg.file_namespace)}\\(?)(?P<index>\\d*)(?P<post>\\)?_\\d+\\.bak)$",
         )
 
     ## Work on getting rid of this batch mode garbage. Hydra's got this.
@@ -226,17 +226,17 @@ def _main(cfg: DictConfig):
                 setting_string = json.dumps(settings)
                 logger.debug("SETTINGS:")
                 logger.debug(setting_string)
-                params = load_settings(setting_string)
-                if params.animation_mode == "3D":
+                cfg = load_settings(setting_string)
+                if cfg.animation_mode == "3D":
                     init_AdaBins()
-                params.allow_overwrite = False
-                do_run(params, latest, restore, restore_run, reencode)
+                cfg.allow_overwrite = False
+                do_run(cfg, latest, restore, restore_run, reencode)
                 restore = False
                 reencode = False
                 gc.collect()
                 torch.cuda.empty_cache()
         else:
-            do_run(params, latest, restore, restore_run, reencode)
+            do_run(cfg, latest, restore, restore_run, reencode)
             logger.info("Complete.")
             gc.collect()
             torch.cuda.empty_cache()
