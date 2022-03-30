@@ -10,7 +10,7 @@
 # elsewhere (TBD)
 
 from loguru import logger
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 import json, random
 import os, re
 from PIL import Image
@@ -197,8 +197,7 @@ def save_settings(settings_dict, path):
         settings_dict = OmegaConf.to_container(settings_dict, resolve=True)
 
     with open(path, "w+") as f:
-        write_settings(settings_dict, f)
-        # OmegaConf.save(config=settings_dict, f=f)
+        OmegaConf.save(config=settings_dict, f=f)
 
 
 # deprecate this (hydra)

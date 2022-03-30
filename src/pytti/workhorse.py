@@ -96,9 +96,7 @@ OUTPATH = f"{os.getcwd()}/images_out/"
 # modules yet, just a collection of settings.
 def parse_scenes(
     embedder,
-    scenes,
-    scene_prefix,
-    scene_suffix,
+    scenes
 ):
     """
     Parses scenes separated by || and applies provided prefixes and suffixes to each scene.
@@ -111,11 +109,11 @@ def parse_scenes(
     prompts = [
         [
             parse_prompt(embedder, p.strip())
-            for p in (scene_prefix + stage + scene_suffix).strip().split("|")
+            for p in (scene.prefix + scene.description + scene.suffix).strip().split("|")
             if p.strip()
         ]
-        for stage in scenes.split("||")
-        if stage
+        for scene in scenes
+        if scene.description
     ]
     logger.info("Prompts loaded.")
     return embedder, prompts
@@ -293,9 +291,7 @@ def do_run(params, latest, restore, restore_run, reencode):
     with vram_usage_mode("Text Prompts"):
         embedder, prompts = parse_scenes(
             embedder,
-            scenes=params.scenes,
-            scene_prefix=params.scene_prefix,
-            scene_suffix=params.scene_suffix,
+            scenes=params.scenes
         )
 
     # load init image
@@ -568,26 +564,29 @@ def do_run(params, latest, restore, restore_run, reencode):
     # `skip_X`: number of _X that have already been processed to completion (per the current iteration)
     # `last_scene`: previously processed scene/prompt (or current prompt if on first/only scene)
 
+    # TODO: not sure about restore, will this work? do we need to respect i in some specific way?
     # FIXME: config refactoring from here
-    params.scenes
-    skip_prompts = i // params.steps_per_scene
-    skip_steps = i % params.steps_per_scene
-    last_scene = prompts[0] if skip_prompts == 0 else prompts[skip_prompts - 1]
-    for scene in prompts[skip_prompts:]:
-        logger.info("Running prompt:", " | ".join(map(str, scene)))
+
+    # TODO: add an initial iteration that calculates just the total duration and duration of individual scenes
+    k = 0
+    last_scene = prompts[0]
+    for scene in params.scenes:
+        steps = params.frames_per_second * scene.duration * scene.steps_per_frame
+        logger.info(f"Running prompt: {scene.description}, steps for this scene: {steps}")
         i += model.run_steps(
-            params.steps_per_scene - skip_steps,
-            scene,
+            steps,
+            prompts[k],
             last_scene,
             loss_augs,
-            interp_steps=params.interpolation_steps,
+            interp_steps=scene.interpolation_steps,
             i_offset=i,
-            skipped_steps=skip_steps,
+            skipped_steps=0,
             gradient_accumulation_steps=params.gradient_accumulation_steps,
+            scene=scene
         )
-        skip_steps = 0
+        last_scene = prompts[k]
         model.clear_dataframe()
-        last_scene = scene
+        k = k+1
 
     # tensorboard summarywriter should supplant all our graph stuff
     if fig:
