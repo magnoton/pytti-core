@@ -205,355 +205,6 @@ def _main(cfg: DictConfig):
             f"^(?P<pre>{re.escape(params.file_namespace)}\\(?)(?P<index>\\d*)(?P<post>\\)?_\\d+\\.bak)$",
         )
 
-    # I feel like there's probably no reason this is defined inside of _main()
-    def do_run():
-
-        # Phase 1 - reset state
-        ########################
-        clear_rotoscopers()  # what a silly name
-        vram_profiling(params.approximate_vram_usage)
-        reset_vram_usage()
-        global CLIP_MODEL_NAMES  # We're gonna do something about these globals
-        # @markdown which frame to restore from
-        restore_frame = latest  # @param{type:"raw"}
-
-        # set up seed for deterministic RNG
-        if params.seed is not None:
-            torch.manual_seed(params.seed)
-
-        # Phase 2 - load and parse
-        ###########################
-
-        # load CLIP
-        load_clip(params)
-
-        cutn = params.cutouts
-        if params.gradient_accumulation_steps > 1:
-            try:
-                assert cutn % params.gradient_accumulation_steps == 0
-            except:
-                logger.warning(
-                    "To use GRADIENT_ACCUMULATION_STEPS > 1, "
-                    "the CUTOUTS parameter must be a scalar multiple of "
-                    "GRADIENT_ACCUMULATION_STEPS. I.e `STEPS/CUTS` must have no remainder."
-                )
-                raise
-            cutn //= params.gradient_accumulation_steps
-        logger.debug(cutn)
-
-        embedder = HDMultiClipEmbedder(
-            # cutn=params.cutouts,
-            cutn=cutn,
-            cut_pow=params.cut_pow,
-            padding=params.cutout_border,
-            border_mode=params.border_mode,
-        )
-
-        # load scenes
-
-        with vram_usage_mode("Text Prompts"):
-            embedder, prompts = parse_scenes(
-                embedder,
-                scenes=params.scenes,
-                scene_prefix=params.scene_prefix,
-                scene_suffix=params.scene_suffix,
-            )
-
-        # load init image
-
-        init_image_pil, height, width = load_init_image(
-            init_image_path=params.init_image,
-            height=params.height,
-            width=params.width,
-        )
-
-        # video source
-        video_frames = None
-        if params.animation_mode == "Video Source":
-
-            video_frames, init_image_pil, height, width = load_video_source(
-                video_path=params.video_path,
-                pre_animation_steps=params.pre_animation_steps,
-                steps_per_frame=params.steps_per_frame,
-                height=params.height,
-                width=params.width,
-                init_image_pil=init_image_pil,
-            )
-
-        # not a fan of modifying the params object like this, but may as well be consistent for now...
-        params.height, params.width = height, width
-
-        # Phase 3 - Setup Optimization
-        ###############################
-
-        # set up image
-        if params.image_model == "Limited Palette":
-            img = PixelImage(
-                *format_params(
-                    params,
-                    "width",
-                    "height",
-                    "pixel_size",
-                    "palette_size",
-                    "palettes",
-                    "gamma",
-                    "hdr_weight",
-                    "palette_normalization_weight",
-                )
-            )
-            img.encode_random(random_pallet=params.random_initial_palette)
-            if params.target_palette.strip() != "":
-                img.set_pallet_target(
-                    Image.open(fetch(params.target_palette)).convert("RGB")
-                )
-            else:
-                img.lock_pallet(params.lock_palette)
-        elif params.image_model == "Unlimited Palette":
-            img = RGBImage(params.width, params.height, params.pixel_size)
-            img.encode_random()
-        elif params.image_model == "VQGAN":
-            model_artifacts_path = Path(params.models_parent_dir) / "vqgan"
-            VQGANImage.init_vqgan(params.vqgan_model, model_artifacts_path)
-            img = VQGANImage(params.width, params.height, params.pixel_size)
-            img.encode_random()
-
-        #######################################
-
-        # set up losses
-
-        loss_augs = []
-
-        if init_image_pil is not None:
-            if not restore:
-                logger.info("Encoding image...")
-                # logger.debug(type(img)) # pytti.Image.PixelImage.PixelImage
-                # logger.debug(type(init_image_pil)) # PIL.Image.Image
-                img.encode_image(init_image_pil)
-                logger.info("Encoded Image:")
-                # pretty sure this assumes we're in a notebook
-                display.display(img.decode_image())
-            # set up init image prompt
-            init_augs = ["direct_init_weight"]
-            init_augs = [
-                build_loss(
-                    x,
-                    params[x],
-                    f"init image ({params.init_image})",
-                    img,
-                    init_image_pil,
-                )
-                for x in init_augs
-                if params[x] not in ["", "0"]
-            ]
-            loss_augs.extend(init_augs)
-            if params.semantic_init_weight not in ["", "0"]:
-                semantic_init_prompt = parse_prompt(
-                    embedder,
-                    f"init image [{params.init_image}]:{params.semantic_init_weight}",
-                    init_image_pil,
-                )
-                prompts[0].append(semantic_init_prompt)
-            else:
-                semantic_init_prompt = None
-        else:
-            init_augs, semantic_init_prompt = [], None
-
-        # other image prompts
-
-        loss_augs.extend(
-            type(img)
-            .get_preferred_loss()
-            .TargetImage(p.strip(), img.image_shape, is_path=True)
-            for p in params.direct_image_prompts.split("|")
-            if p.strip()
-        )
-
-        # stabilization
-
-        stabilization_augs = [
-            "direct_stabilization_weight",
-            "depth_stabilization_weight",
-            "edge_stabilization_weight",
-        ]
-        stabilization_augs = [
-            build_loss(x, params[x], "stabilization", img, init_image_pil)
-            for x in stabilization_augs
-            if params[x] not in ["", "0"]
-        ]
-        loss_augs.extend(stabilization_augs)
-
-        if params.semantic_stabilization_weight not in ["0", ""]:
-            last_frame_semantic = parse_prompt(
-                embedder,
-                f"stabilization:{params.semantic_stabilization_weight}",
-                init_image_pil if init_image_pil else img.decode_image(),
-            )
-            last_frame_semantic.set_enabled(init_image_pil is not None)
-            for scene in prompts:
-                scene.append(last_frame_semantic)
-        else:
-            last_frame_semantic = None
-
-        # optical flow
-        if params.animation_mode == "Video Source":
-            if params.flow_stabilization_weight == "":
-                params.flow_stabilization_weight = "0"
-            optical_flows = [
-                OpticalFlowLoss.TargetImage(
-                    f"optical flow stabilization (frame {-2**i}):{params.flow_stabilization_weight}",
-                    img.image_shape,
-                )
-                for i in range(params.flow_long_term_samples + 1)
-            ]
-            for optical_flow in optical_flows:
-                optical_flow.set_enabled(False)
-            loss_augs.extend(optical_flows)
-        elif params.animation_mode == "3D" and params.flow_stabilization_weight not in [
-            "0",
-            "",
-        ]:
-            optical_flows = [
-                TargetFlowLoss.TargetImage(
-                    f"optical flow stabilization:{params.flow_stabilization_weight}",
-                    img.image_shape,
-                )
-            ]
-            for optical_flow in optical_flows:
-                optical_flow.set_enabled(False)
-            loss_augs.extend(optical_flows)
-        else:
-            optical_flows = []
-        # other loss augs
-        if params.smoothing_weight != 0:
-            loss_augs.append(TVLoss(weight=params.smoothing_weight))
-
-        # Phase 4 - setup outputs
-        ##########################
-
-        # Transition as much of this as possible to hydra
-
-        # set up filespace
-        Path(f"{OUTPATH}/{params.file_namespace}").mkdir(parents=True, exist_ok=True)
-        Path(f"backup/{params.file_namespace}").mkdir(parents=True, exist_ok=True)
-        if restore:
-            base_name = (
-                params.file_namespace
-                if restore_run == 0
-                else f"{params.file_namespace}({restore_run})"
-            )
-        elif not params.allow_overwrite:
-            # finds the next available base_name to save files with. Why did I do this with regex?
-            _, i = get_next_file(
-                f"{OUTPATH}/{params.file_namespace}",
-                f"^(?P<pre>{re.escape(params.file_namespace)}\\(?)(?P<index>\\d*)(?P<post>\\)?_1\\.png)$",
-                [f"{params.file_namespace}_1.png", f"{params.file_namespace}(1)_1.png"],
-            )
-            base_name = (
-                params.file_namespace if i == 0 else f"{params.file_namespace}({i})"
-            )
-        else:
-            base_name = params.file_namespace
-
-        # restore
-        if restore:
-            if not reencode:
-                if restore_frame == latest:
-                    filename, restore_frame = get_last_file(
-                        f"backup/{params.file_namespace}",
-                        f"^(?P<pre>{re.escape(base_name)}_)(?P<index>\\d*)(?P<post>\\.bak)$",
-                    )
-                else:
-                    filename = f"{base_name}_{restore_frame}.bak"
-                logger.info("restoring from", filename)
-                img.load_state_dict(
-                    torch.load(f"backup/{params.file_namespace}/{filename}")
-                )
-            else:  # reencode
-                if restore_frame == latest:
-                    filename, restore_frame = get_last_file(
-                        f"{OUTPATH}/{params.file_namespace}",
-                        f"^(?P<pre>{re.escape(base_name)}_)(?P<index>\\d*)(?P<post>\\.png)$",
-                    )
-                else:
-                    filename = f"{base_name}_{restore_frame}.png"
-                logger.info("restoring from", filename)
-                img.encode_image(
-                    Image.open(f"{OUTPATH}/{params.file_namespace}/{filename}").convert(
-                        "RGB"
-                    )
-                )
-            i = restore_frame * params.save_every
-        else:
-            i = 0
-
-        ## tensorboard should handle this stuff.
-
-        # graphs
-        fig, axs = None, None
-        if params.show_graphs:
-            fig, axs = plt.subplots(4, 1, figsize=(21, 13))
-            axs = np.asarray(axs).flatten()
-
-        # Phase 5 - setup optimizer
-        ############################
-
-        # make the main model object
-        model = DirectImageGuide(
-            img,
-            embedder,
-            lr=params.learning_rate,
-            params=params,
-            writer=writer,
-            OUTPATH=OUTPATH,
-            base_name=base_name,
-            fig=fig,
-            axs=axs,
-            video_frames=video_frames,
-            optical_flows=optical_flows,
-            last_frame_semantic=last_frame_semantic,  # fml...
-            semantic_init_prompt=semantic_init_prompt,
-            init_augs=init_augs,
-            null_update=False,  # uh... we can do better.
-        )
-
-        # Pretty sure this isn't necessary, Hydra should take care of saving
-        # the run settings now
-        settings_path = f"{OUTPATH}/{params.file_namespace}/{base_name}_settings.txt"
-        logger.info(f"Settings saved to {settings_path}")
-        save_settings(params, settings_path)
-
-        # Run the training loop
-        ########################
-
-        # `i`: current iteration
-        # `skip_X`: number of _X that have already been processed to completion (per the current iteration)
-        # `last_scene`: previously processed scene/prompt (or current prompt if on first/only scene)
-        skip_prompts = i // params.steps_per_scene
-        skip_steps = i % params.steps_per_scene
-        last_scene = prompts[0] if skip_prompts == 0 else prompts[skip_prompts - 1]
-        for scene in prompts[skip_prompts:]:
-            logger.info("Running prompt:", " | ".join(map(str, scene)))
-            i += model.run_steps(
-                params.steps_per_scene - skip_steps,
-                scene,
-                last_scene,
-                loss_augs,
-                interp_steps=params.interpolation_steps,
-                i_offset=i,
-                skipped_steps=skip_steps,
-                gradient_accumulation_steps=params.gradient_accumulation_steps,
-            )
-            skip_steps = 0
-            model.clear_dataframe()
-            last_scene = scene
-
-        # tensorboard summarywriter should supplant all our graph stuff
-        if fig:
-            del fig, axs
-        ############################# DMARX
-        writer.close()
-        #############################
-
     ## Work on getting rid of this batch mode garbage. Hydra's got this.
     try:
         gc.collect()
@@ -579,13 +230,13 @@ def _main(cfg: DictConfig):
                 if params.animation_mode == "3D":
                     init_AdaBins()
                 params.allow_overwrite = False
-                do_run()
+                do_run(params, latest, restore, restore_run, reencode)
                 restore = False
                 reencode = False
                 gc.collect()
                 torch.cuda.empty_cache()
         else:
-            do_run()
+            do_run(params, latest, restore, restore_run, reencode)
             logger.info("Complete.")
             gc.collect()
             torch.cuda.empty_cache()
@@ -594,6 +245,356 @@ def _main(cfg: DictConfig):
     except RuntimeError:
         print_vram_usage()
         raise
+
+def do_run(params, latest, restore, restore_run, reencode):
+    # Phase 1 - reset state
+    ########################
+    clear_rotoscopers()  # what a silly name
+    vram_profiling(params.approximate_vram_usage)
+    reset_vram_usage()
+    global CLIP_MODEL_NAMES  # We're gonna do something about these globals
+    # @markdown which frame to restore from
+    restore_frame = latest  # @param{type:"raw"}
+
+    # set up seed for deterministic RNG
+    if params.seed is not None:
+        torch.manual_seed(params.seed)
+
+    # Phase 2 - load and parse
+    ###########################
+
+    # load CLIP
+    load_clip(params)
+
+    cutn = params.cutouts
+    if params.gradient_accumulation_steps > 1:
+        try:
+            assert cutn % params.gradient_accumulation_steps == 0
+        except:
+            logger.warning(
+                "To use GRADIENT_ACCUMULATION_STEPS > 1, "
+                "the CUTOUTS parameter must be a scalar multiple of "
+                "GRADIENT_ACCUMULATION_STEPS. I.e `STEPS/CUTS` must have no remainder."
+            )
+            raise
+        cutn //= params.gradient_accumulation_steps
+    logger.debug(cutn)
+
+    embedder = HDMultiClipEmbedder(
+        # cutn=params.cutouts,
+        cutn=cutn,
+        cut_pow=params.cut_pow,
+        padding=params.cutout_border,
+        border_mode=params.border_mode,
+    )
+
+    # load scenes
+
+    with vram_usage_mode("Text Prompts"):
+        embedder, prompts = parse_scenes(
+            embedder,
+            scenes=params.scenes,
+            scene_prefix=params.scene_prefix,
+            scene_suffix=params.scene_suffix,
+        )
+
+    # load init image
+
+    init_image_pil, height, width = load_init_image(
+        init_image_path=params.init_image,
+        height=params.height,
+        width=params.width,
+    )
+
+    # video source
+    video_frames = None
+    if params.animation_mode == "Video Source":
+
+        video_frames, init_image_pil, height, width = load_video_source(
+            video_path=params.video_path,
+            pre_animation_steps=params.pre_animation_steps,
+            steps_per_frame=params.steps_per_frame,
+            height=params.height,
+            width=params.width,
+            init_image_pil=init_image_pil,
+        )
+
+    # not a fan of modifying the params object like this, but may as well be consistent for now...
+    params.height, params.width = height, width
+
+    # Phase 3 - Setup Optimization
+    ###############################
+
+    # set up image
+    if params.image_model == "Limited Palette":
+        img = PixelImage(
+            *format_params(
+                params,
+                "width",
+                "height",
+                "pixel_size",
+                "palette_size",
+                "palettes",
+                "gamma",
+                "hdr_weight",
+                "palette_normalization_weight",
+            )
+        )
+        img.encode_random(random_pallet=params.random_initial_palette)
+        if params.target_palette.strip() != "":
+            img.set_pallet_target(
+                Image.open(fetch(params.target_palette)).convert("RGB")
+            )
+        else:
+            img.lock_pallet(params.lock_palette)
+    elif params.image_model == "Unlimited Palette":
+        img = RGBImage(params.width, params.height, params.pixel_size)
+        img.encode_random()
+    elif params.image_model == "VQGAN":
+        model_artifacts_path = Path(params.models_parent_dir) / "vqgan"
+        VQGANImage.init_vqgan(params.vqgan_model, model_artifacts_path)
+        img = VQGANImage(params.width, params.height, params.pixel_size)
+        img.encode_random()
+
+    #######################################
+
+    # set up losses
+
+    loss_augs = []
+
+    if init_image_pil is not None:
+        if not restore:
+            logger.info("Encoding image...")
+            # logger.debug(type(img)) # pytti.Image.PixelImage.PixelImage
+            # logger.debug(type(init_image_pil)) # PIL.Image.Image
+            img.encode_image(init_image_pil)
+            logger.info("Encoded Image:")
+            # pretty sure this assumes we're in a notebook
+            display.display(img.decode_image())
+        # set up init image prompt
+        init_augs = ["direct_init_weight"]
+        init_augs = [
+            build_loss(
+                x,
+                params[x],
+                f"init image ({params.init_image})",
+                img,
+                init_image_pil,
+            )
+            for x in init_augs
+            if params[x] not in ["", "0"]
+        ]
+        loss_augs.extend(init_augs)
+        if params.semantic_init_weight not in ["", "0"]:
+            semantic_init_prompt = parse_prompt(
+                embedder,
+                f"init image [{params.init_image}]:{params.semantic_init_weight}",
+                init_image_pil,
+            )
+            prompts[0].append(semantic_init_prompt)
+        else:
+            semantic_init_prompt = None
+    else:
+        init_augs, semantic_init_prompt = [], None
+
+    # other image prompts
+
+    loss_augs.extend(
+        type(img)
+        .get_preferred_loss()
+        .TargetImage(p.strip(), img.image_shape, is_path=True)
+        for p in params.direct_image_prompts.split("|")
+        if p.strip()
+    )
+
+    # stabilization
+
+    stabilization_augs = [
+        "direct_stabilization_weight",
+        "depth_stabilization_weight",
+        "edge_stabilization_weight",
+    ]
+    stabilization_augs = [
+        build_loss(x, params[x], "stabilization", img, init_image_pil)
+        for x in stabilization_augs
+        if params[x] not in ["", "0"]
+    ]
+    loss_augs.extend(stabilization_augs)
+
+    if params.semantic_stabilization_weight not in ["0", ""]:
+        last_frame_semantic = parse_prompt(
+            embedder,
+            f"stabilization:{params.semantic_stabilization_weight}",
+            init_image_pil if init_image_pil else img.decode_image(),
+        )
+        last_frame_semantic.set_enabled(init_image_pil is not None)
+        for scene in prompts:
+            scene.append(last_frame_semantic)
+    else:
+        last_frame_semantic = None
+
+    # optical flow
+    if params.animation_mode == "Video Source":
+        if params.flow_stabilization_weight == "":
+            params.flow_stabilization_weight = "0"
+        optical_flows = [
+            OpticalFlowLoss.TargetImage(
+                f"optical flow stabilization (frame {-2**i}):{params.flow_stabilization_weight}",
+                img.image_shape,
+            )
+            for i in range(params.flow_long_term_samples + 1)
+        ]
+        for optical_flow in optical_flows:
+            optical_flow.set_enabled(False)
+        loss_augs.extend(optical_flows)
+    elif params.animation_mode == "3D" and params.flow_stabilization_weight not in [
+        "0",
+        "",
+    ]:
+        optical_flows = [
+            TargetFlowLoss.TargetImage(
+                f"optical flow stabilization:{params.flow_stabilization_weight}",
+                img.image_shape,
+            )
+        ]
+        for optical_flow in optical_flows:
+            optical_flow.set_enabled(False)
+        loss_augs.extend(optical_flows)
+    else:
+        optical_flows = []
+    # other loss augs
+    if params.smoothing_weight != 0:
+        loss_augs.append(TVLoss(weight=params.smoothing_weight))
+
+    # Phase 4 - setup outputs
+    ##########################
+
+    # Transition as much of this as possible to hydra
+
+    # set up filespace
+    Path(f"{OUTPATH}/{params.file_namespace}").mkdir(parents=True, exist_ok=True)
+    Path(f"backup/{params.file_namespace}").mkdir(parents=True, exist_ok=True)
+    if restore:
+        base_name = (
+            params.file_namespace
+            if restore_run == 0
+            else f"{params.file_namespace}({restore_run})"
+        )
+    elif not params.allow_overwrite:
+        # finds the next available base_name to save files with. Why did I do this with regex?
+        _, i = get_next_file(
+            f"{OUTPATH}/{params.file_namespace}",
+            f"^(?P<pre>{re.escape(params.file_namespace)}\\(?)(?P<index>\\d*)(?P<post>\\)?_1\\.png)$",
+            [f"{params.file_namespace}_1.png", f"{params.file_namespace}(1)_1.png"],
+        )
+        base_name = (
+            params.file_namespace if i == 0 else f"{params.file_namespace}({i})"
+        )
+    else:
+        base_name = params.file_namespace
+
+    # restore
+    if restore:
+        if not reencode:
+            if restore_frame == latest:
+                filename, restore_frame = get_last_file(
+                    f"backup/{params.file_namespace}",
+                    f"^(?P<pre>{re.escape(base_name)}_)(?P<index>\\d*)(?P<post>\\.bak)$",
+                )
+            else:
+                filename = f"{base_name}_{restore_frame}.bak"
+            logger.info("restoring from", filename)
+            img.load_state_dict(
+                torch.load(f"backup/{params.file_namespace}/{filename}")
+            )
+        else:  # reencode
+            if restore_frame == latest:
+                filename, restore_frame = get_last_file(
+                    f"{OUTPATH}/{params.file_namespace}",
+                    f"^(?P<pre>{re.escape(base_name)}_)(?P<index>\\d*)(?P<post>\\.png)$",
+                )
+            else:
+                filename = f"{base_name}_{restore_frame}.png"
+            logger.info("restoring from", filename)
+            img.encode_image(
+                Image.open(f"{OUTPATH}/{params.file_namespace}/{filename}").convert(
+                    "RGB"
+                )
+            )
+        i = restore_frame * params.save_every
+    else:
+        i = 0
+
+    ## tensorboard should handle this stuff.
+
+    # graphs
+    fig, axs = None, None
+    if params.show_graphs:
+        fig, axs = plt.subplots(4, 1, figsize=(21, 13))
+        axs = np.asarray(axs).flatten()
+
+    # Phase 5 - setup optimizer
+    ############################
+
+    # make the main model object
+    model = DirectImageGuide(
+        img,
+        embedder,
+        lr=params.learning_rate,
+        params=params,
+        writer=writer,
+        OUTPATH=OUTPATH,
+        base_name=base_name,
+        fig=fig,
+        axs=axs,
+        video_frames=video_frames,
+        optical_flows=optical_flows,
+        last_frame_semantic=last_frame_semantic,  # fml...
+        semantic_init_prompt=semantic_init_prompt,
+        init_augs=init_augs,
+        null_update=False,  # uh... we can do better.
+    )
+
+    # Pretty sure this isn't necessary, Hydra should take care of saving
+    # the run settings now
+    settings_path = f"{OUTPATH}/{params.file_namespace}/{base_name}_settings.txt"
+    logger.info(f"Settings saved to {settings_path}")
+    save_settings(params, settings_path)
+
+    # Run the training loop
+    ########################
+
+    # `i`: current iteration
+    # `skip_X`: number of _X that have already been processed to completion (per the current iteration)
+    # `last_scene`: previously processed scene/prompt (or current prompt if on first/only scene)
+
+    # FIXME: config refactoring from here
+    params.scenes
+    skip_prompts = i // params.steps_per_scene
+    skip_steps = i % params.steps_per_scene
+    last_scene = prompts[0] if skip_prompts == 0 else prompts[skip_prompts - 1]
+    for scene in prompts[skip_prompts:]:
+        logger.info("Running prompt:", " | ".join(map(str, scene)))
+        i += model.run_steps(
+            params.steps_per_scene - skip_steps,
+            scene,
+            last_scene,
+            loss_augs,
+            interp_steps=params.interpolation_steps,
+            i_offset=i,
+            skipped_steps=skip_steps,
+            gradient_accumulation_steps=params.gradient_accumulation_steps,
+        )
+        skip_steps = 0
+        model.clear_dataframe()
+        last_scene = scene
+
+    # tensorboard summarywriter should supplant all our graph stuff
+    if fig:
+        del fig, axs
+    ############################# DMARX
+    writer.close()
+    #############################
 
 
 if __name__ == "__main__":
