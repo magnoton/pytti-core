@@ -13,15 +13,24 @@ def check_input_against_list(attribute, value, valid_values):
             f"{value} is not a valid input for {attribute.name} Valid inputs are {valid_values}"
         )
 
+@define(auto_attribs=True)
+class SceneConfigurationSchema:
+    """
+    Describes the parameters of a singular scene within the context of the global configuration
+    """
+    description: str = "???"
+    prefix: str = ""
+    suffix: str = ""
+    steps_per_frame: int = 50
+    duration: float = "???"
+    interpolation_steps: int = 0
 
 @define(auto_attribs=True)
 class ConfigSchema:
     #############
     ## Prompts ##
     #############
-    scenes: str = ""
-    scene_prefix: str = ""
-    scene_suffix: str = ""
+    scenes: SceneConfigurationSchema = None
 
     direct_image_prompts: str = ""
     init_image: str = ""
@@ -44,9 +53,7 @@ class ConfigSchema:
     width: int = 180
     height: int = 112
 
-    steps_per_scene: int = 100
-    steps_per_frame: int = 50
-    interpolation_steps: int = 0
+
 
     learning_rate: Optional[float] = None  # based on pytti.Image.DifferentiableImage
     reset_lr_each_frame: bool = True
@@ -171,6 +178,7 @@ class ConfigSchema:
     display_every: int = 50
     clear_every: int = 0
     display_scale: int = 1
+    # TODO can we deprecate this? what is it _actually_ needed for? unclear for video source.
     save_every: int = 50
 
     backups: int = 0

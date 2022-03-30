@@ -140,6 +140,7 @@ class DirectImageGuide:
         i_offset=0,
         skipped_steps=0,
         gradient_accumulation_steps: int = 1,
+        scene=None
     ):
         """
         runs the optimizer
@@ -156,7 +157,7 @@ class DirectImageGuide:
             #        initialized with a renderer or not, and call self.renderer.update()
             #        if appropriate
             if not self.null_update:
-                self.update(i + i_offset, i + skipped_steps)
+                self.update(i + i_offset, i + skipped_steps, scene)
             losses = self.train(
                 i + skipped_steps,
                 prompts,
@@ -458,6 +459,7 @@ class DirectImageGuide:
         # move to class
         i,
         stage_i,
+        scene
     ):
         """
         Orchestrates animation transformations and reporting
@@ -497,13 +499,14 @@ class DirectImageGuide:
             show_palette=params.show_palette,
         )
 
+        save_every=scene.steps_per_frame
         model.save_out(
             i=i,
             # img=img,
             writer=writer,
             OUTPATH=OUTPATH,
             base_name=base_name,
-            save_every=params.save_every,
+            save_every=save_every,
             file_namespace=params.file_namespace,
             backups=params.backups,
         )
@@ -512,7 +515,7 @@ class DirectImageGuide:
         ################
         ## TO DO: attach T as a class attribute
         t = (i - params.pre_animation_steps) / (
-            params.steps_per_frame * params.frames_per_second
+            scene.steps_per_frame * params.frames_per_second
         )
         if self.audio_parser is None:
             set_t(t, 0, 0, 0)
@@ -523,10 +526,10 @@ class DirectImageGuide:
                 logger.debug(f"Time: {t:.4f} seconds, audio params: lo: {lo:.4f}, mid: {mid:.4f}, hi: {hi:.4f}")
                 set_t(t, lo, mid, hi)
             # next_step_pil = None
-            if (i - params.pre_animation_steps) % params.steps_per_frame == 0:
+            if (i - params.pre_animation_steps) % scene.steps_per_frame == 0:
                 logger.debug(f"Time: {t:.4f} seconds")
                 update_rotoscopers(
-                    ((i - params.pre_animation_steps) // params.steps_per_frame + 1)
+                    ((i - params.pre_animation_steps) // scene.steps_per_frame + 1)
                     * params.frame_stride
                 )
                 if params.reset_lr_each_frame:
@@ -588,7 +591,7 @@ class DirectImageGuide:
                         base_name=base_name,
                         pre_animation_steps=params.pre_animation_steps,
                         frame_stride=params.frame_stride,
-                        steps_per_frame=params.steps_per_frame,
+                        steps_per_frame=scene.steps_per_frame,
                         file_namespace=params.file_namespace,
                         reencode_each_frame=params.reencode_each_frame,
                         lock_palette=params.lock_palette,

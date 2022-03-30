@@ -11,9 +11,18 @@ defaults:
 ## Prompts ##
 #############
 
-scenes: ???
-scene_prefix: ''
-scene_suffix: ''
+# Override in actual config, see demo.yaml
+scenes: []
+#- description: spaceship flying towards a black hole | space | science fiction | black hole accretion disk visualization | interstellar
+#  prefix: 'cgi | render | 3d | science fiction | credit nasa | hubble'
+#  suffix: '| space:-1:-.95 | art:-1:-.95 | render:-1:-.95'
+#  steps_per_frame: 10
+#  # duration in seconds of this scene. 
+#  # The number of steps (and thus compute necessary/how long it takes to run) is n_steps = frames_per_second * steps_per_frame * duration
+#  duration: 20.0
+#  # interpolation steps from previous scene if existent (ignored on first scene)
+#  interpolation_steps: 0
+
 
 direct_image_prompts: ''
 init_image: ''
@@ -33,7 +42,6 @@ height: 112
 
 steps_per_scene: 100
 steps_per_frame: 50
-interpolation_steps: 0
 
 learning_rate: null
 reset_lr_each_frame: true
