@@ -82,8 +82,6 @@ class DepthLoss(MSELoss):
             depth_input = pil_image
             depth_resized = False
         # run the depth model (whatever that means)
-        gc.collect()
-        torch.cuda.empty_cache()
         # os.chdir('AdaBins')
         # try:
         #  _, depth_map = infer_helper.predict_pil(depth_input)
