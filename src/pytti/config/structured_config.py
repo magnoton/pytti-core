@@ -15,6 +15,13 @@ def check_input_against_list(attribute, value, valid_values):
 
 
 @define(auto_attribs=True)
+class AudioFilterConfig:
+    variable_name: str = "???"
+    f_center: int = "???"
+    f_width: int = "???"
+    order: int = 5
+
+@define(auto_attribs=True)
 class ConfigSchema:
     #############
     ## Prompts ##
@@ -78,8 +85,7 @@ class ConfigSchema:
     input_audio: str = ""
     input_audio_offset: float = 0
     input_audio_window_size: int = 1024
-    input_audio_band_split_low_medium: int = 500
-    input_audio_band_split_medium_high: int = 3500
+    input_audio_filters: AudioFilterConfig = None
 
     #  _2d and _3d only apply to those animation modes
 
