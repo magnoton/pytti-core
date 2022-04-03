@@ -568,6 +568,7 @@ def do_run(params, latest, restore, restore_run, reencode):
     # FIXME: config refactoring from here
 
     # TODO: add an initial iteration that calculates just the total duration and duration of individual scenes
+    # TODO: let's see if we can scope ImageGuide and its animation parameters to the scene as well
     k = 0
     last_scene = prompts[0]
     for scene in params.scenes:
