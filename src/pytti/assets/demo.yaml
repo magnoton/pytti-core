@@ -1,9 +1,9 @@
 # @package _global_
 
 scenes:
-- description: spaceship flying towards a black hole | space | science fiction | black hole accretion disk visualization | interstellar
-  prefix: 'cgi | render | 3d | science fiction | credit nasa | hubble'
-  suffix: '| space:-1:-.95 | art:-1:-.95 | render:-1:-.95'
+- description: deep space habitation ring made of glass | galactic nebula | wow! space is full of fractal creatures darting around everywhere like fireflies
+  prefix: 'astrophotography #pixelart | image credit nasa | space full of cybernetic neon:3_galactic nebula | isometric pixelart by Sachin Teng | '
+  suffix: '| satellite image:-1:-.95 | text:-1:-.95 | anime:-1:-.95 | watermark:-1:-.95 | backyard telescope:-1:-.95 | map:-1:-.95'
   steps_per_frame: 1
   # duration in seconds of this scene. 
   # The number of steps (and thus compute necessary/how long it takes to run) is n_steps = frames_per_second * steps_per_frame * duration
