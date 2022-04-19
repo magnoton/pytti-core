@@ -41,6 +41,8 @@ class SpectralAudioParser:
         if len(self.audio_samples) < 0:
             raise RuntimeError("Audio samples are empty, assuming load failed")
         self.duration = len(self.audio_samples) / SAMPLERATE
+        if self.duration is 0:
+            raise RuntimeError("Audio must not be empty when defined.")
         logger.debug(
             f"initialized audio file {input_audio}, samples read: {len(self.audio_samples)}, total duration: {self.duration}s")
         self.offset = offset
